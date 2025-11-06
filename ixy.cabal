@@ -1,9 +1,10 @@
+cabal-version:       2.2
 name:                ixy
 version:             0.1.0.0
 -- synopsis:
 -- description:
 homepage:            https://github.com/githubuser/ixy#readme
-license:             BSD3
+license:             BSD-3-Clause
 license-file:        LICENSE
 author:              Author name here
 maintainer:          example@example.com
@@ -11,9 +12,28 @@ copyright:           2018 Author name here
 category:            Web
 build-type:          Simple
 extra-source-files:  README.md
-cabal-version:       >=1.10
+
+common dump-core
+    GHC-Options:
+      -ddump-to-file
+      -ddump-simpl
+      -ddump-simpl-stats
+      -ddump-spec
+      -ddump-rule-firings
+      -dsuppress-all
+      -dsuppress-uniques
+    if impl(ghc >= 9.4)
+      ghc-options:
+        -dlint
+        -dno-suppress-core-sizes
+
+Flag dev
+  Description: Dumps Core representation
+  Default:     False
+  Manual:      True
 
 library
+  import: dump-core
   hs-source-dirs:      src
   ghc-options:         -Wall
   exposed-modules:     Ixgbe
@@ -32,6 +52,7 @@ library
   default-extensions:  OverloadedStrings, FlexibleContexts, BangPatterns
 
 executable forwarder 
+  import: dump-core
   hs-source-dirs:      app
   main-is:             Forwarder.hs
   ghc-options:         -Wall
