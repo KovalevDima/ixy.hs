@@ -1,4 +1,3 @@
-{-# LANGUAGE TemplateHaskell #-}
 -- |
 -- Module      :  Lib.Pci
 -- Copyright   :  Alex Egger 2018
@@ -18,12 +17,7 @@ module Lib.Pci
   )
 where
 
-import           Lib.Prelude
 
-import           Control.Monad.Catch
-import           Data.Bits                      ( shift
-                                                , (.|.)
-                                                )
 import qualified Data.ByteString               as B
 import qualified Data.Text                     as T
 import           System.IO.Error                ( isDoesNotExistError )
@@ -31,9 +25,6 @@ import           System.Path                    ( (</>) )
 import qualified System.Path                   as Path
 import qualified System.Path.IO                as PathIO
 import           System.Posix.IO                ( handleToFd )
-import           Control.Monad.Logger           ( MonadLogger
-                                                , logDebug
-                                                )
 import           System.Posix.Memory            ( MemoryMapFlag(MemoryMapShared)
                                                 , MemoryProtection
                                                   ( MemoryProtectionRead
@@ -41,7 +32,28 @@ import           System.Posix.Memory            ( MemoryMapFlag(MemoryMapShared)
                                                   )
                                                 , memoryMap
                                                 )
-import           Text.Regex.PCRE                ( (=~) )
+import Data.Text
+import Foreign (Ptr)
+import Data.Bits
+import Data.Char
+import Data.Text.IO as T (putStrLn)
+import Control.Exception
+
+isPCI :: T.Text -> Bool
+isPCI txt =
+  case T.splitOn ":" txt of
+    [p1, p2, rest] ->
+      T.length p1 == 4 && T.all isHexDigit p1 &&
+      T.length p2 == 2 && T.all isHexDigit p2 &&
+      case T.breakOn "." rest of
+        (p3, dotAndLast) ->
+          case T.uncons dotAndLast of
+            Just ('.', lastPart) ->
+              T.length p3 == 2 && T.all isHexDigit p3 &&
+              T.length lastPart == 1 && T.all isDigit lastPart
+            _ -> False
+    _ -> False
+
 
 -- | A set of Bus, Device, and Function identifiers that identify a PCI device.
 --
@@ -64,7 +76,7 @@ newtype BusDeviceFunction = BDF
 -- To see the formatting requirements see 'BusDeviceFunction'.
 busDeviceFunction :: Text -> Maybe BusDeviceFunction
 busDeviceFunction bdfText
-  | T.unpack bdfText =~ T.unpack "[0-9A-Fa-f]{4}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}.[0-9]"
+  | isPCI bdfText
   = Just (BDF bdfText)
 busDeviceFunction _ = Nothing
 
@@ -75,17 +87,16 @@ base = Path.absDir "/sys/bus/pci/devices/"
 
 -- | Map a resource of a PCI device into memory.
 mapResource
-  :: (MonadCatch m, MonadThrow m, MonadIO m, MonadLogger m)
-  => BusDeviceFunction -- ^ The 'BusDeviceFunction' of the device the resource that will be mapped belongs to.
+  :: BusDeviceFunction -- ^ The 'BusDeviceFunction' of the device the resource that will be mapped belongs to.
   -> Text -- ^ The filename of the resource that will be mapped.
-  -> m (Ptr a) -- ^ A 'Ptr' to the beginning of the mapped resource.
+  -> IO (Ptr a) -- ^ A 'Ptr' to the beginning of the mapped resource.
 mapResource bdf resource =
   let path =
         base
           </> Path.relPath (T.unpack $ unBusDeviceFunction bdf)
           </> Path.relFile (T.unpack resource)
   in  do
-        $(logDebug)
+        T.putStrLn
           $  "Mapping resource \'"
           <> resource
           <> "\' for device "
@@ -93,7 +104,7 @@ mapResource bdf resource =
           <> "."
         unbind bdf
         enableDMA bdf
-        liftIO $ PathIO.withBinaryFile path PathIO.ReadWriteMode inner
+        PathIO.withBinaryFile path PathIO.ReadWriteMode inner
  where
   inner h = do
     size <- PathIO.hFileSize h
@@ -108,9 +119,8 @@ mapResource bdf resource =
 -- $Internal
 -- | Enable DMA for a PCI device.
 enableDMA
-  :: (MonadIO m, MonadLogger m)
-  => BusDeviceFunction -- ^ The 'BusDeviceFunction' of the device for which DMA will be enabled.
-  -> m ()
+  :: BusDeviceFunction -- ^ The 'BusDeviceFunction' of the device for which DMA will be enabled.
+  -> IO ()
 enableDMA bdf =
   let path =
         base
@@ -119,8 +129,8 @@ enableDMA bdf =
   in  inner path
  where
   inner path = do
-    $(logDebug) $ "Enabling DMA for device " <> unBusDeviceFunction bdf <> "."
-    liftIO $ PathIO.withBinaryFile
+    T.putStrLn $ "Enabling DMA for device " <> unBusDeviceFunction bdf <> "."
+    PathIO.withBinaryFile
       path
       PathIO.ReadWriteMode
       (\h -> do
@@ -135,21 +145,20 @@ enableDMA bdf =
 
 -- | Unbind a PCI device from its driver.
 unbind
-  :: (MonadCatch m, MonadThrow m, MonadIO m, MonadLogger m)
-  => BusDeviceFunction -- ^ The 'BusDeviceFunction' of the device that will be unbound.
-  -> m ()
+  :: BusDeviceFunction -- ^ The 'BusDeviceFunction' of the device that will be unbound.
+  -> IO ()
 unbind bdf =
   let path =
         base
           </> Path.relPath (T.unpack $ unBusDeviceFunction bdf)
           </> Path.filePath "driver/unbind"
-  in  catchIOError (inner path) handler
+  in  catch (inner path) handler
  where
   inner path = do
-    $(logDebug)
+    T.putStrLn
       $  "Unbinding driver for device "
       <> unBusDeviceFunction bdf
       <> "."
-    liftIO $ PathIO.writeFile path $ T.unpack $ unBusDeviceFunction bdf
-  handler e | isDoesNotExistError e = $(logDebug) "Device was already unbound."
-  handler e                         = throwM e
+    PathIO.writeFile path $ T.unpack $ unBusDeviceFunction bdf
+  handler e | isDoesNotExistError e = T.putStrLn "Device was already unbound."
+  handler e                         = throwIO e

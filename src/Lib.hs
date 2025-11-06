@@ -1,4 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
 -- |
 -- Module      :  Lib
 -- Copyright   :  Alex Egger 2018
@@ -19,22 +18,19 @@ where
 
 import           Lib.Ixgbe
 import           Lib.Pci                        ( busDeviceFunction )
-import           Lib.Prelude
 
-import           Control.Monad.Catch
-import           Control.Monad.Logger           ( MonadLogger )
+import Data.Text (Text)
 
 -- | Initializes a driver for a device.
 --
 -- Currently only supports IXGBE.
 newDriver
-  :: (MonadCatch m, MonadThrow m, MonadIO m, MonadLogger m)
-  => Text -- ^ The 'BusDeviceFunction' of the device.
+  :: Text -- ^ The 'BusDeviceFunction' of the device.
   -> Int -- ^ The number of rx queues to initialize.
   -> Int -- ^ The number of tx queues to initialize.
-  -> m (Maybe Device)
+  -> IO (Maybe Device)
 newDriver bdfT numRx numTx = case busDeviceFunction bdfT of
   Just bdf -> do
-    !dev <- init bdf numRx numTx
+    !dev <- initDev bdf numRx numTx
     return $ Just dev
   Nothing -> return Nothing

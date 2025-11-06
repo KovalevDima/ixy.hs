@@ -14,11 +14,6 @@ It supports Intel 82599 10GbE NICs (`ixgbe` family of devices).
 
 Install [stack](https://haskellstack.org) by whatever means.
 
-Make sure to `libpcre3-dev` is installed, otherwise execute (or equivalent):
-```
-apt install libpcre3-dev
-```
-
 Ixy.hs needs hugepages to work. To allocate some use the provided script `setup-hugetlbfs.sh`:
 ```
 sudo ./setup-hugetlbfs.sh

@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE InstanceSigs #-}
 -- |
 -- Module      :  Lib.Memory
 -- Copyright   :  Alex Egger 2018
@@ -28,45 +28,33 @@ module Lib.Memory
   )
 where
 
-import           Lib.Prelude
 
-import           Control.Monad.Logger           ( MonadLogger
-                                                , logDebug
-                                                )
-import           Control.Monad.Catch     hiding ( bracket )
-import qualified Data.Array.IO                 as Array
-import           Data.Binary.Get
-import qualified Data.ByteString               as B
-import           Data.ByteString.Unsafe
-import           Data.IORef
-import           Foreign.Marshal.Utils          ( copyBytes )
-import           Foreign.Ptr                    ( WordPtr(..)
-                                                , castPtr
-                                                , plusPtr
-                                                , ptrToWordPtr
-                                                )
-import           Foreign.Storable               ( sizeOf
-                                                , alignment
-                                                , peek
-                                                , peekByteOff
-                                                , poke
-                                                , pokeByteOff
-                                                )
-import           System.IO.Error                ( userError )
-import qualified System.Path                   as Path
-import qualified System.Path.IO                as PathIO
-import           System.Posix.IO                ( closeFd
-                                                , handleToFd
-                                                )
-import           System.Posix.Memory            ( MemoryMapFlag(MemoryMapShared)
-                                                , MemoryProtection
-                                                  ( MemoryProtectionRead
-                                                  , MemoryProtectionWrite
-                                                  )
-                                                , memoryLock
-                                                , memoryMap
-                                                , sysconfPageSize
-                                                )
+import Data.Array.IO (IOUArray, newListArray, readArray, writeArray)
+import Data.Binary.Get (getWord64le, pushChunk, runGetIncremental, Decoder(Fail, Done, Partial))
+import Data.ByteString as B (empty, hGet)
+import Data.ByteString.Unsafe (unsafePackCStringLen, unsafeUseAsCStringLen)
+import Data.IORef (modifyIORef', newIORef, readIORef, IORef)
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (WordPtr(..), castPtr, plusPtr, ptrToWordPtr, Ptr)
+import Foreign.Storable (sizeOf, alignment, peek, peekByteOff, poke, pokeByteOff, Storable)
+import System.Path as Path (absDir, relFile, absFile)
+import System.Path.IO as PathIO
+import System.Posix.IO (closeFd, handleToFd)
+import System.Posix.Memory ( MemoryMapFlag(MemoryMapShared)
+                           , MemoryProtection
+                             ( MemoryProtectionRead
+                             , MemoryProtectionWrite
+                             )
+                           , memoryLock
+                           , memoryMap
+                           , sysconfPageSize
+                           )
+import Data.ByteString (ByteString)
+import Data.Word (Word8, Word64)
+import Data.Text as T (show)
+import Control.Exception (bracket, throwIO)
+import Data.Bits (Bits((.&.), shift, shiftR))
+import Data.Text.IO as T (putStrLn)
 
 newtype PhysAddr = PhysAddr Word64
 newtype VirtAddr a = VirtAddr (Ptr a)
@@ -82,30 +70,27 @@ hugepageSize = shift 1 hugepageBits
 -- $ Allocations
 
 allocateMem
-  :: (MonadThrow m, MonadIO m, MonadLogger m) => Int -> Bool -> m (Ptr a)
+  :: Int -> Bool -> IO (Ptr a)
 allocateMem size contiguous = do
-  $(logDebug)
-    $  "Allocating a memory chunk with size "
-    <> show size
-    <> "B (contiguous="
-    <> show contiguous
-    <> ")."
+  T.putStrLn
+    $  "Allocating a memory chunk with size " <> T.show size
+    <> "B (contiguous=" <> T.show contiguous <> ")."
   let s = if size `mod` hugepageSize /= 0
         then shift (shiftR size hugepageBits + 1) hugepageBits
         else size
-  liftIO $ do
-    (_, h) <- PathIO.openBinaryTempFile (Path.absDir "/mnt/huge")
-                                        (Path.relFile "ixy.huge")
-    PathIO.hSetFileSize h $ fromIntegral s
-    let f = memoryMap Nothing
-                      (fromIntegral s)
-                      [MemoryProtectionRead, MemoryProtectionWrite]
-                      MemoryMapShared
-    ptr <- bracket (handleToFd h) closeFd (\fd -> Just fd `f` 0)
-    memoryLock ptr $ fromIntegral s
-    -- TODO: We should remove this, but not here.
-    -- Dir.removeFile fname
-    return ptr
+  
+  (_, h) <- PathIO.openBinaryTempFile (Path.absDir "/mnt/huge")
+                                      (Path.relFile "ixy.huge")
+  PathIO.hSetFileSize h $ fromIntegral s
+  let f = memoryMap Nothing
+                    (fromIntegral s)
+                    [MemoryProtectionRead, MemoryProtectionWrite]
+                    MemoryMapShared
+  ptr <- bracket (handleToFd h) closeFd (\fd -> Just fd `f` 0)
+  memoryLock ptr $ fromIntegral s
+  -- TODO: We should remove this, but not here.
+  -- Dir.removeFile fname
+  return ptr
 
 -- $ Memory Pools
 
@@ -117,12 +102,13 @@ data PacketBuf = PacketBuf { pbId :: Int
 instance Storable PacketBuf where
   sizeOf _ = 2048
   alignment = sizeOf
+  peek :: Ptr PacketBuf -> IO PacketBuf
   peek ptr = do
-    id <- peek (castPtr ptr)
+    id' <- peek (castPtr ptr)
     addr <- peekByteOff ptr addrOffset
     size <- peekByteOff ptr sizeOffset
     bufData <- unsafePackCStringLen (castPtr (ptr `plusPtr` dataOffset), size)
-    return PacketBuf {pbId = id, pbAddr = PhysAddr addr, pbSize = size, pbData = bufData}
+    return PacketBuf {pbId = id', pbAddr = PhysAddr addr, pbSize = size, pbData = bufData}
   poke ptr buf = do
     poke (castPtr ptr) $ pbId buf
     pokeByteOff ptr addrOffset bufAddr
@@ -141,18 +127,17 @@ dataOffset = sizeOffset + sizeOf (0 :: Int)
 
 data MemPool = MemPool { mpBaseAddr :: Ptr Word8
                        , mpNumEntries :: Int
-                       , mpFreeBufs :: Array.IOUArray Int Int
+                       , mpFreeBufs :: IOUArray Int Int
                        , mpTop :: IORef Int
                        }
 
-mkMemPool :: (MonadThrow m, MonadIO m, MonadLogger m) => Int -> m MemPool
+mkMemPool :: Int -> IO MemPool
 mkMemPool numEntries = do
   ptr <- allocateMem (numEntries * bufSize) False
   mapM_ initBuf
         [ (ptr `plusPtr` (i * bufSize), i) | i <- [0 .. numEntries - 1] ]
-  freeBufs <- liftIO
-    $ Array.newListArray (0, numEntries - 1) [0 .. numEntries - 1]
-  topRef <- liftIO $ newIORef (numEntries :: Int)
+  freeBufs <- newListArray (0, numEntries - 1) [0 .. numEntries - 1]
+  topRef <- newIORef (numEntries :: Int)
   return MemPool
     { mpBaseAddr   = ptr
     , mpNumEntries = numEntries
@@ -161,8 +146,8 @@ mkMemPool numEntries = do
     }
  where
   initBuf (bufPtr, i) = do
-    bufPhysAddr <- liftIO $ translate $ VirtAddr (bufPtr `plusPtr` dataOffset)
-    liftIO $ poke
+    bufPhysAddr <- translate $ VirtAddr (bufPtr `plusPtr` dataOffset)
+    poke
       bufPtr
       PacketBuf {pbId = i, pbAddr = bufPhysAddr, pbSize = 0, pbData = B.empty}
   bufSize = sizeOf (undefined :: PacketBuf)
@@ -172,12 +157,12 @@ allocateBuf memPool = do
   let topRef = mpTop memPool
   modifyIORef' topRef (\i -> i - 1)
   top <- readIORef topRef
-  id  <- Array.readArray (mpFreeBufs memPool) top
-  return $ idToPtr memPool id
+  id'  <- readArray (mpFreeBufs memPool) top
+  return $ idToPtr memPool id'
 
 idToPtr :: MemPool -> Int -> Ptr PacketBuf
-idToPtr memPool id =
-  (mpBaseAddr memPool) `plusPtr` (id * sizeOf (undefined :: PacketBuf))
+idToPtr memPool id' =
+  (mpBaseAddr memPool) `plusPtr` (id' * sizeOf (undefined :: PacketBuf))
 
 peekId :: Ptr PacketBuf -> IO Int
 peekId ptr = peek (castPtr ptr)
@@ -192,10 +177,10 @@ pokeSize :: Ptr PacketBuf -> Int -> IO ()
 pokeSize ptr = pokeByteOff ptr sizeOffset
 
 freeBuf :: MemPool -> Int -> IO ()
-freeBuf memPool id = do
+freeBuf memPool id' = do
   let topRef = mpTop memPool
   top <- readIORef topRef
-  Array.writeArray (mpFreeBufs memPool) top id
+  writeArray (mpFreeBufs memPool) top id'
   modifyIORef' topRef (+ 1)
 
 -- $ Utility
@@ -209,8 +194,8 @@ translate (VirtAddr virt) = PathIO.withBinaryFile path PathIO.ReadMode inner
     case runGetIncremental getWord64le `pushChunk` buf of
       Done _ _ b -> return $ PhysAddr $ getAddr $ fromIntegral b
       Partial _ ->
-        throwM $ userError "Partial input when parsing physical address."
-      Fail{} -> throwM $ userError "Physical address was malformed."
+        throwIO $ userError "Partial input when parsing physical address."
+      Fail{} -> throwIO $ userError "Physical address was malformed."
   path         = Path.absFile "/proc/self/pagemap"
   WordPtr addr = ptrToWordPtr virt
   offset       = (addr `quot` pageSize) * 8 -- This is not arch-specific, hence the magic number.

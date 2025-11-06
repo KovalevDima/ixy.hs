@@ -1,6 +1,5 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE NamedFieldPuns #-}
 -- |
 -- Module      :  Lib.Ixgbe
 -- Copyright   :  Alex Egger 2018
@@ -16,7 +15,7 @@
 module Lib.Ixgbe
   ( Device(..)
   , Stats(..)
-  , init
+  , initDev
   , receive
   , send
   , stats
@@ -26,27 +25,21 @@ module Lib.Ixgbe
   )
 where
 
-import           Lib.Ixgbe.Queue
-import           Lib.Memory
-import           Lib.Pci
-import           Lib.Prelude             hiding ( get
-                                                , wait
-                                                )
+import Lib.Ixgbe.Queue
+import Lib.Memory
+import Lib.Pci (BusDeviceFunction(..), mapResource)
 
-import           Control.Monad.Catch
-import           Control.Monad.Logger
-import           Data.IORef
-import qualified Data.Text                     as T
-import qualified Data.Vector                   as V
-import           Foreign.Storable               ( sizeOf
-                                                , peekByteOff
-                                                , pokeByteOff
-                                                , peek
-                                                , poke
-                                                )
-import           Numeric                        ( showHex )
-import           System.IO.Error                ( userError )
-import           System.Posix.Unistd            ( usleep )
+import Data.IORef (modifyIORef', readIORef, writeIORef)
+import Data.Text as T (show, pack)
+import Data.Text.IO as T (putStrLn)
+import Data.Vector as V (Vector, empty, fromList, (!))
+import Foreign.Storable ( sizeOf, peekByteOff, pokeByteOff, peek, poke)
+import Numeric (showHex)
+import System.Posix.Unistd (usleep)
+import Foreign (Ptr, Word32, Bits (..))
+import Data.Text (Text)
+import Control.Monad (when, unless, forM)
+import Control.Exception (throwIO)
 
 data Device = Device { devBasePtr :: Ptr Word32
                      , devBdf :: BusDeviceFunction
@@ -55,75 +48,59 @@ data Device = Device { devBasePtr :: Ptr Word32
 
 -- $ Initialization
 
-init
-  :: (MonadCatch m, MonadThrow m, MonadIO m, MonadLogger m)
-  => BusDeviceFunction
-  -> Int
-  -> Int
-  -> m Device
-init bdf numRx numTx = do
-  $(logDebug) $ "Inititializing device " <> unBusDeviceFunction bdf <> "."
-  basePtr              <- mapResource bdf "resource0"
-  (rxQueues, txQueues) <- runReaderT
+initDev :: BusDeviceFunction -> Int -> Int -> IO Device
+initDev devBdf numRx numTx = do
+  T.putStrLn $ "Inititializing device " <> unBusDeviceFunction devBdf <> "."
+  devBasePtr              <- mapResource devBdf "resource0"
+  (rxQueues, txQueues) <- 
     go
     Device
-      { devBasePtr  = basePtr
-      , devBdf      = bdf
+      { devBasePtr, devBdf
       , devRxQueues = V.empty
       , devTxQueues = V.empty
       }
   return $! Device
-    { devBasePtr  = basePtr
-    , devBdf      = bdf
+    { devBasePtr, devBdf
     , devRxQueues = V.fromList rxQueues
     , devTxQueues = V.fromList txQueues
     }
  where
-  go = do
-    reset
-    initLink
+  go dev = do
+    reset dev
+    initLink dev
     _        <- stats'
-    rxQueues <- initRx numRx
-    txQueues <- initTx numTx
+    rxQueues <- initRx numRx dev
+    txQueues <- initTx numTx dev
     setPromisc' True
-    waitForLink 10000000
+    waitForLink 10000000 dev
     return (rxQueues, txQueues)
    where
     stats' = do
-      dev <- ask
-      liftIO $ stats dev
+      stats dev
     setPromisc' flag = do
-      dev <- ask
-      liftIO $ setPromisc dev flag
+      setPromisc dev flag
 
-initRx
-  :: (MonadThrow m, MonadIO m, MonadReader Device m, MonadLogger m)
-  => Int
-  -> m [RxQueue]
-initRx numRx = do
-  $(logInfo) $ "Initializing " <> show numRx <> " rx queues."
-  dev <- ask
+initRx :: Int -> Device -> IO [RxQueue]
+initRx numRx dev = do
+  T.putStrLn $ "Initializing " <> T.show numRx <> " rx queues."
   -- Disable Rx while configuring.
-  liftIO $ clearMask dev RXCTRL rxEnable
+  clearMask dev RXCTRL rxEnable
   -- Set packet buffer sizes.
-  liftIO $ do
-    set dev (RXPBSIZE 0) bSize
-    mapM_ (\i -> set dev (RXPBSIZE i) 0) [1 .. 7]
+  set dev (RXPBSIZE 0) bSize
+  mapM_ (\i -> set dev (RXPBSIZE i) 0) [1 .. 7]
   -- Enable CRC offloading.
-  liftIO $ do
-    setMask dev HLREG0  crcStrip
-    setMask dev RDRXCTL crcStrip
+  setMask dev HLREG0  crcStrip
+  setMask dev RDRXCTL crcStrip
   -- Enable accepting of breadcast packets.
-  liftIO $ setMask dev FCTRL broadcastAcceptMode
+  setMask dev FCTRL broadcastAcceptMode
   -- Do per-queue configuration.
   queues <- mapM setupQueue [0 .. numRx - 1]
   -- No snoop disable.
-  liftIO $ setMask dev CTRL_EXT noSnoopDisable
+  setMask dev CTRL_EXT noSnoopDisable
   -- Magic flags for broken feature.
-  liftIO
-    $ mapM_ (\i -> clearMask dev (DCA_RXCTRL i) $ shift 1 12) [0 .. numRx - 1]
+  mapM_ (\i -> clearMask dev (DCA_RXCTRL i) $ shift 1 12) [0 .. numRx - 1]
   -- Enable Rx again.
-  liftIO $ setMask dev RXCTRL rxEnable
+  setMask dev RXCTRL rxEnable
 
   mapM_ startQueue [0 .. numRx - 1]
   return $! queues
@@ -133,74 +110,71 @@ initRx numRx = do
   crcStrip            = 0x2
   broadcastAcceptMode = 0x400
   noSnoopDisable      = 0x10000
-  setupQueue id = do
-    $(logDebug) $ "Initializing rx queue " <> show id <> "."
+  setupQueue id' = do
+    T.putStrLn $ "Initializing rx queue " <> T.show id' <> "."
     -- Enable advanced receive descriptors.
-    dev             <- ask
     advRxDescEnable <- fmap
       (.|. (0x02000000 :: Word32))
-      ((.&. (0xF1FFFFFF :: Word32)) <$> liftIO (get dev (SRRCTL id)))
-    liftIO $ set dev (SRRCTL id) advRxDescEnable
+      ((.&. (0xF1FFFFFF :: Word32)) <$> (get dev (SRRCTL id')))
+    set dev (SRRCTL id') advRxDescEnable
     -- Enable dropping of packets, when all descriptors are full.
-    liftIO $ setMask dev (SRRCTL id) dropEnable
+    setMask dev (SRRCTL id') dropEnable
     -- Setup descriptor ring.
     queue             <- mkRxQueue
-    PhysAddr physAddr <- liftIO $ translate $ VirtAddr $ rxqDescriptor queue 0
-    liftIO $ do
-      set dev (RDBAL id) $ fromIntegral $ physAddr .&. 0xFFFFFFFF
-      set dev (RDBAH id) $ fromIntegral $ shift physAddr (-32)
-      set dev (RDLEN id)
-        $ fromIntegral
-        $ numRxQueueEntries
-        * sizeOf nullReceiveDescriptor
-    $(logDebug)
+    PhysAddr physAddr <- translate $ VirtAddr $ rxqDescriptor queue 0
+    
+    set dev (RDBAL id') $ fromIntegral $ physAddr .&. 0xFFFFFFFF
+    set dev (RDBAH id') $ fromIntegral $ shift physAddr (-32)
+    set dev (RDLEN id')
+      $ fromIntegral
+      $ numRxQueueEntries
+      * sizeOf nullReceiveDescriptor
+    T.putStrLn
       $  "Rx Ring "
-      <> show id
+      <> T.show id'
       <> " at "
-      <> show (rxqDescriptor queue 0)
+      <> T.show (rxqDescriptor queue 0)
       <> "(phys="
       <> T.pack (showHex physAddr "")
       <> ")."
      -- Set ring to empty at the start.
-    liftIO $ do
-      set dev (RDH id) 0
-      set dev (RDT id) 0
+    
+    set dev (RDH id') 0
+    set dev (RDT id') 0
     return $! queue
     where dropEnable = 0x10000000
-  startQueue id = do
-    dev <- ask
-    $(logDebug) $ "Starting rx queue " <> show id <> "."
+  startQueue id' = do
+    T.putStrLn $ "Starting rx queue " <> T.show id' <> "."
     -- Enable queue and wait.
-    liftIO $ do
-      setMask dev (RXDCTL id) rxdctlEnable
-      waitSet dev (RXDCTL id) rxdctlEnable
+    
+    setMask dev (RXDCTL id') rxdctlEnable
+    waitSet dev (RXDCTL id') rxdctlEnable
     -- Set rx queue to full.
-    liftIO $ do
-      set dev (RDH id) 0
-      set dev (RDT id) $ fromIntegral (numRxQueueEntries - 1)
+    
+    set dev (RDH id') 0
+    set dev (RDT id') $ fromIntegral (numRxQueueEntries - 1)
     where rxdctlEnable = 0x2000000
 
 initTx
-  :: (MonadThrow m, MonadIO m, MonadReader Device m, MonadLogger m)
-  => Int
-  -> m [TxQueue]
-initTx numTx = do
-  $(logInfo) $ "Initializing " <> show numTx <> " tx queues."
-  dev <- ask
+  :: Int
+  -> Device
+  -> IO [TxQueue]
+initTx numTx dev = do
+  T.putStrLn $ "Initializing " <> T.show numTx <> " tx queues."
   -- Enable CRC offloading and small packet padding.
-  liftIO $ setMask dev HLREG0 crcPadEnable
+  setMask dev HLREG0 crcPadEnable
   -- Set packet buffer sizes.
-  liftIO $ do
-    set dev (TXPBSIZE 0) bSize
-    mapM_ (\i -> set dev (TXPBSIZE i) 0) [1 .. 7]
+  
+  set dev (TXPBSIZE 0) bSize
+  mapM_ (\i -> set dev (TXPBSIZE i) 0) [1 .. 7]
   -- Required flags, when DCB/VTd are disabled.
-  liftIO $ do
-    set dev DTXMXSZRQ 0xFFFF
-    clearMask dev RTTDCS arbiterDisable
+  
+  set dev DTXMXSZRQ 0xFFFF
+  clearMask dev RTTDCS arbiterDisable
   -- Do per-queue configuration.
   queues <- mapM setupQueue [0 .. numTx - 1]
   -- Enable DMA.
-  liftIO $ set dev DMATXCTL dmaTxEnable
+  set dev DMATXCTL dmaTxEnable
 
   mapM_ startQueue [0 .. numTx - 1]
   return $! queues
@@ -209,64 +183,50 @@ initTx numTx = do
   bSize          = 0xA000
   arbiterDisable = 0x40
   dmaTxEnable    = 0x1
-  setupQueue id = do
-    $(logDebug) $ "Initializing tx queue " <> show id <> "."
-    dev               <- ask
+  setupQueue id' = do
+    T.putStrLn $ "Initializing tx queue " <> T.show id' <> "."
     -- Setup descriptor ring.
     queue             <- mkTxQueue
-    PhysAddr physAddr <- liftIO $ translate $ VirtAddr $ txqDescriptor queue 0
-    liftIO $ do
-      set dev (TDBAL id) $ fromIntegral $ physAddr .&. 0xFFFFFFFF
-      set dev (TDBAH id) $ fromIntegral $ shift physAddr (-32)
-      set dev (TDLEN id)
+    PhysAddr physAddr <- translate $ VirtAddr $ txqDescriptor queue 0
+    
+    set dev (TDBAL id') $ fromIntegral $ physAddr .&. 0xFFFFFFFF
+    set dev (TDBAH id') $ fromIntegral $ shift physAddr (-32)
+    set dev (TDLEN id')
         $ fromIntegral
         $ numTxQueueEntries
         * sizeOf nullTransmitDescriptor
-    $(logDebug)
-      $  "Tx Ring "
-      <> show id
-      <> " at "
-      <> show (txqDescriptor queue 0)
-      <> "(phys="
-      <> T.pack (showHex physAddr "")
-      <> ")."
+    let phys = T.pack (showHex physAddr "")
+        at = T.show (txqDescriptor queue 0)
+    T.putStrLn $ "Tx Ring " <> T.show id' <> " at " <> at <> "(phys=" <> phys <> ")."
     -- Descriptor writeback magic values.
-    liftIO $ set dev (TXDCTL id) =<< wbMagic <$> get dev (TXDCTL id)
+    set dev (TXDCTL id') =<< wbMagic <$> get dev (TXDCTL id')
     return $! queue
    where
     wbMagic =
       (.|. (36 .|. shift 8 8 .|. shift 4 16))
         . (.&. complement (0x7F .|. shift 0x7F 8 .|. shift 0x7F 16))
-  startQueue id = do
-    dev <- ask
-    $(logDebug) $ "Starting tx queue " <> show id <> "."
+  startQueue id' = do
+    T.putStrLn $ "Starting tx queue " <> T.show id' <> "."
     -- Tx queue starts out empty.
-    liftIO $ do
-      set dev (TDH id) 0
-      set dev (TDT id) 0
+    set dev (TDH id') 0
+    set dev (TDT id') 0
     -- Enable queue and wait.
-    liftIO $ do
-      setMask dev (TXDCTL id) txdctlEnable
-      waitSet dev (TXDCTL id) txdctlEnable
+    setMask dev (TXDCTL id') txdctlEnable
+    waitSet dev (TXDCTL id') txdctlEnable
     where txdctlEnable = 0x2000000
 
-initLink :: (MonadIO m, MonadReader Device m) => m ()
-initLink = do
-  dev <- ask
-  -- TODO: If stuff doesn't work check missing init here.
-  liftIO $ setMask dev AUTOC anRestart
+initLink :: Device -> IO ()
+initLink dev = setMask dev AUTOC anRestart
   where anRestart = 0x1000
 
-reset :: (MonadIO m, MonadReader Device m) => m ()
-reset = do
-  dev <- ask
-  liftIO $ do
-    set dev EIMC disableInterrupt
-    set dev CTRL resetMask
-    waitClear dev CTRL resetMask
-    set dev EIMC disableInterrupt
-    waitSet dev EEC     autoReadDone
-    waitSet dev RDRXCTL dmaInitCycleDone
+reset :: Device -> IO ()
+reset dev = do
+  set dev EIMC disableInterrupt
+  set dev CTRL resetMask
+  waitClear dev CTRL resetMask
+  set dev EIMC disableInterrupt
+  waitSet dev EEC     autoReadDone
+  waitSet dev RDRXCTL dmaInitCycleDone
  where
   resetMask        = 0x4000008
   disableInterrupt = 0x7FFFFFFF
@@ -276,8 +236,8 @@ reset = do
 -- $ Operations
 
 receive :: Device -> Int -> Int -> IO [Ptr PacketBuf]
-receive dev id num =
-  let queue = devRxQueues dev V.! id
+receive dev id' num =
+  let queue = devRxQueues dev V.! id'
   in  do
         index <- readIORef (rxqIndexRef queue)
         go queue index 0 []
@@ -289,7 +249,7 @@ receive dev id num =
           let index' = (index + i) `rem` numRxQueueEntries
           when (index /= index') $ do
             let j = (index + i - 1) `rem` numRxQueueEntries
-            set dev (RDT id) $ fromIntegral j
+            set dev (RDT id') $ fromIntegral j
             writeIORef (rxqIndexRef queue) index'
   go queue !index !i bufs = do
     let next    = (index + i) `rem` numRxQueueEntries
@@ -318,7 +278,7 @@ receive dev id num =
           let index' = (index + i) `rem` numRxQueueEntries
           when (index /= index') $ do
             let j = (index + i - 1) `rem` numRxQueueEntries
-            set dev (RDT id) $ fromIntegral j
+            set dev (RDT id') $ fromIntegral j
             writeIORef (rxqIndexRef queue) index'
 
 txCleanBatch :: Int
@@ -326,12 +286,12 @@ txCleanBatch = 32
 
 send :: Device -> Int -> MemPool -> [Ptr PacketBuf] -> IO ()
 send _ _ _ [] = return ()
-send dev id memPool bufs = do
-  let txQueue = devTxQueues dev V.! id
+send dev id' memPool bufs = do
+  let txQueue = devTxQueues dev V.! id'
   clean txQueue
   cleanIndex <- readIORef (txqCleanRef txQueue)
   go txQueue cleanIndex bufs
-  set dev (TDT id)
+  set dev (TDT id')
     =<< (\index -> fromIntegral $ (index - 1) `mod` numTxQueueEntries)
     <$> readIORef (txqIndexRef txQueue)
  where
@@ -422,7 +382,7 @@ dump dev = foldr (<>) "" <$> forM [0, 0x2 .. 0xE000] (showRegister . toEnum)
   showRegister register = if register /= UNDEFINED
     then do
       current <- get dev register
-      return $ show register <> ": " <> T.pack (showHex current "") <> "\n"
+      return $ T.show register <> ": " <> T.pack (showHex current "") <> "\n"
     else return ""
 
 
@@ -430,23 +390,22 @@ dump dev = foldr (<>) "" <$> forM [0, 0x2 .. 0xE000] (showRegister . toEnum)
 
 data LinkSpeed = LinkNotReady | Link100M | Link1G | Link10G
 
-waitForLink :: (MonadIO m, MonadReader Device m, MonadLogger m) => Int -> m ()
-waitForLink timeout = do
-  $(logDebug) "Waiting for link..."
+waitForLink :: Int -> Device -> IO ()
+waitForLink timeout dev = do
+  T.putStrLn "Waiting for link..."
   wait 0
  where
   wait numTries | numTries * 10000 >= timeout =
-    $(logDebug) "Maximum wait time exceeded."
+    T.putStrLn "Maximum wait time exceeded."
   wait numTries = linkSpeed >>= \case
     LinkNotReady -> do
-      liftIO $ usleep 10000
+      usleep 10000
       wait (numTries + 1)
-    Link100M -> $(logDebug) "Link speed was set to 100MBit/s"
-    Link1G   -> $(logDebug) "Link speed was set to 1GBit/s"
-    Link10G  -> $(logDebug) "Link speed was set to 10GBit/s"
+    Link100M -> T.putStrLn "Link speed was set to 100MBit/s"
+    Link1G   -> T.putStrLn "Link speed was set to 1GBit/s"
+    Link10G  -> T.putStrLn "Link speed was set to 10GBit/s"
   linkSpeed = do
-    dev   <- ask
-    links <- liftIO $ get dev LINKS
+    links <- get dev LINKS
     if links .&. linksUp == 0
       then return LinkNotReady
       else
@@ -653,7 +612,7 @@ waitUntil dev register value f = do
   if f $ current .&. value
     then return ()
     else do
-      liftIO $ usleep 10000
+      usleep 10000
       waitUntil dev register value f
 
 waitSet :: Device -> Register -> Word32 -> IO ()
@@ -664,4 +623,4 @@ waitClear dev register value = waitUntil dev register value (== 0)
 
 -- $ Helpers
 memPoolOf :: Device -> Int -> MemPool
-memPoolOf dev id = rxqMemPool $ devRxQueues dev V.! id
+memPoolOf dev id' = rxqMemPool $ devRxQueues dev V.! id'

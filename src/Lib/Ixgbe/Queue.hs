@@ -31,24 +31,15 @@ module Lib.Ixgbe.Queue
   )
 where
 
-import           Lib.Memory
-import           Lib.Prelude
+import Lib.Memory
 
-import           Control.Monad.Catch            ( MonadThrow )
-import           Control.Monad.Logger
-import qualified Data.Array.IO                 as Array
-import           Data.IORef
-import           Foreign.Ptr                    ( castPtr
-                                                , plusPtr
-                                                )
-import           Foreign.Storable               ( sizeOf
-                                                , alignment
-                                                , peek
-                                                , poke
-                                                , peekByteOff
-                                                , pokeByteOff
-                                                )
-import           Foreign.Marshal.Utils          ( fillBytes )
+import Data.Array.IO as Array (newListArray, readArray, writeArray, newArray_, IOUArray )
+import Data.IORef (IORef, newIORef)
+import Foreign.Ptr (castPtr, plusPtr, Ptr)
+import Foreign.Storable (sizeOf, alignment, peek, poke, peekByteOff, pokeByteOff, Storable)
+import Foreign.Marshal.Utils (fillBytes)
+import Data.Word (Word16, Word32, Word64)
+import Data.Bits (Bits(..))
 
 numRxQueueEntries :: Int
 numRxQueueEntries = 512
@@ -63,11 +54,11 @@ bufferSize = 2048
 
 data RxQueue = RxQueue { rxqDescriptor :: Int -> Ptr ReceiveDescriptor
                        , rxqMemPool :: !MemPool
-                       , rxqMap :: !(Array.IOUArray Int Int)
+                       , rxqMap :: !(IOUArray Int Int)
                        , rxqIndexRef :: !(IORef Int)
                        }
 
-mkRxQueue :: (MonadThrow m, MonadIO m, MonadLogger m) => m RxQueue
+mkRxQueue :: IO RxQueue
 mkRxQueue = do
   -- Setup the descriptors and buffers.
   memPool <- mkMemPool $ (numRxQueueEntries + numTxQueueEntries) * 2
@@ -76,8 +67,8 @@ mkRxQueue = do
   let descriptor i = descPtr `plusPtr` (i * sizeOf nullReceiveDescriptor)
   ids <- mapM (setupDescriptor memPool)
               [ descriptor i | i <- [0 .. numRxQueueEntries - 1] ]
-  indexRef <- liftIO $ newIORef (0 :: Int)
-  m        <- liftIO $ Array.newListArray (0, numRxQueueEntries - 1) ids
+  indexRef <- newIORef (0 :: Int)
+  m        <- newListArray (0, numRxQueueEntries - 1) ids
   return $! RxQueue
     { rxqDescriptor = descriptor
     , rxqMemPool    = memPool
@@ -85,30 +76,30 @@ mkRxQueue = do
     , rxqIndexRef   = indexRef
     }
  where
-  setupDescriptor memPool ptr = liftIO $ do
+  setupDescriptor memPool ptr = do
     buf <- peek =<< allocateBuf memPool
     let PhysAddr physAddr = pbAddr buf
     poke ptr ReceiveRead {rdBufPhysAddr = physAddr, rdHeaderAddr = 0}
     return $ pbId buf
 
 rxMap :: RxQueue -> Int -> Int -> IO ()
-rxMap queue = Array.writeArray (rxqMap queue)
+rxMap queue = writeArray (rxqMap queue)
 
 rxGetMapping :: RxQueue -> Int -> IO Int
-rxGetMapping queue = Array.readArray (rxqMap queue)
+rxGetMapping queue = readArray (rxqMap queue)
 
 data TxQueue = TxQueue { txqDescriptor :: Int -> Ptr TransmitDescriptor
-                       , txqMap :: !(Array.IOUArray Int Int)
+                       , txqMap :: !(IOUArray Int Int)
                        , txqIndexRef :: !(IORef Int)
                        , txqCleanRef :: !(IORef Int)}
 
-mkTxQueue :: (MonadThrow m, MonadIO m, MonadLogger m) => m TxQueue
+mkTxQueue :: IO TxQueue
 mkTxQueue = do
   descPtr <- allocateDescriptors
     (numTxQueueEntries * sizeOf nullTransmitDescriptor)
-  indexRef <- liftIO $ newIORef (0 :: Int)
-  cleanRef <- liftIO $ newIORef (0 :: Int)
-  m        <- liftIO $ Array.newArray_ (0, numTxQueueEntries - 1)
+  indexRef <- newIORef (0 :: Int)
+  cleanRef <- newIORef (0 :: Int)
+  m        <- newArray_ (0, numTxQueueEntries - 1)
   let descriptor i = descPtr `plusPtr` (i * sizeOf nullTransmitDescriptor)
   return $! TxQueue
     { txqDescriptor = descriptor
@@ -118,10 +109,10 @@ mkTxQueue = do
     }
 
 txMap :: TxQueue -> Int -> Int -> IO ()
-txMap queue = Array.writeArray (txqMap queue)
+txMap queue = writeArray (txqMap queue)
 
 txGetMapping :: TxQueue -> Int -> IO Int
-txGetMapping queue = Array.readArray (txqMap queue)
+txGetMapping queue = readArray (txqMap queue)
 
 -- $ Descriptors
 
@@ -140,7 +131,7 @@ instance Storable ReceiveDescriptor where
   poke ptr (ReceiveRead bufPhysAddr headerAddr) = do
     poke (castPtr ptr) bufPhysAddr
     pokeByteOff ptr 8 headerAddr
-  poke _ (ReceiveWriteback _ _) = return $ panic "Cannot poke a writeback descriptor."
+  poke _ (ReceiveWriteback _ _) = return $ error "Cannot poke a writeback descriptor."
 
 nullReceiveDescriptor :: ReceiveDescriptor
 nullReceiveDescriptor = ReceiveRead {rdBufPhysAddr = 0, rdHeaderAddr = 0}
@@ -166,7 +157,7 @@ instance Storable TransmitDescriptor where
     poke (castPtr ptr) bufPhysAddr
     pokeByteOff ptr 8 cmdTypeLen
     pokeByteOff ptr 12 olInfoStatus
-  poke _ (TransmitWriteback _) = return $ panic "Cannot poke a writeback descriptor."
+  poke _ (TransmitWriteback _) = return $ error "Cannot poke a writeback descriptor."
 
 nullTransmitDescriptor :: TransmitDescriptor
 nullTransmitDescriptor =
@@ -174,9 +165,8 @@ nullTransmitDescriptor =
 
 -- $ Memory
 
-allocateDescriptors
-  :: (MonadThrow m, MonadIO m, MonadLogger m) => Int -> m (Ptr a)
+allocateDescriptors :: Int -> IO (Ptr a)
 allocateDescriptors size = do
   descPtr <- allocateMem size True
-  liftIO $ fillBytes descPtr 0xFF size
+  fillBytes descPtr 0xFF size
   return descPtr

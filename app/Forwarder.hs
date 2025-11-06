@@ -1,22 +1,18 @@
-{-# LANGUAGE BangPatterns               #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Main where
 
-import           Lib
+import Lib (Stats(stRxPkts), Device, receive, send, stats, memPoolOf, newDriver)
 
-import           Control.Monad
-import           Control.Monad.Catch
-import           Control.Monad.Logger
-import           Data.IORef
-import           Data.List
-import           Data.Maybe
-import qualified Data.Text            as T
-import           Foreign.Storable     (peekByteOff, pokeByteOff)
-import           Protolude
-import           System.Clock
-import Text.Read
-
-newtype App a = App { runApp :: LoggingT IO a } deriving (Functor, Applicative, Monad, MonadIO, MonadCatch, MonadThrow, MonadLogger)
+import Control.Monad (when, forever)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
+import Data.Maybe (fromJust)
+import Data.Text as T (pack, show)
+import Foreign.Storable (peekByteOff, pokeByteOff)
+import System.Clock (Clock(Monotonic), TimeSpec(..), getTime, diffTimeSpec)
+import Data.Text.IO as T (putStrLn)
+import Data.Text (Text)
+import Data.Word (Word8)
+import System.Environment (getArgs)
+import Data.Bits ((.&.))
 
 main :: IO ()
 main = do
@@ -24,18 +20,17 @@ main = do
   let bdfT1 = T.pack $ args !! 0
       bdfT2 = T.pack $ args !! 1
       batchSize = read $ (args !! 2) :: Int
-  runStdoutLoggingT (runApp $ run bdfT1 bdfT2 batchSize)
+  run bdfT1 bdfT2 batchSize
 
-run :: Text -> Text -> Int -> App ()
+run :: Text -> Text -> Int -> IO ()
 run bdfT1 bdfT2 batchSize = do
   dev1    <- fromJust <$> newDriver bdfT1 1 1
   dev2    <- fromJust <$> newDriver bdfT2 1 1
-  counter <- liftIO $ newIORef (0 :: Int)
-  liftIO $ loop counter dev1 dev2 batchSize
+  counter <- newIORef (0 :: Int)
+  loop counter dev1 dev2 batchSize
 
 loop :: IORef Int -> Device -> Device -> Int -> IO ()
 loop counter dev1 dev2 batchSize = do
-  let clock = Monotonic
   timeRef <- newIORef (TimeSpec {sec = 0, nsec = 0})
   forever $ do
     forward dev1 dev2 batchSize
@@ -44,7 +39,7 @@ loop counter dev1 dev2 batchSize = do
     when
       (c .&. 0xF == 0)
       (do
-        !t          <- getTime clock
+        !t          <- getTime Monotonic
         !beforeTime <- readIORef timeRef
         let diffTime = diffTimeSpec t beforeTime
         when
@@ -56,20 +51,10 @@ loop counter dev1 dev2 batchSize = do
                   fromIntegral (sec diffTime)
                     + (fromIntegral (nsec diffTime) / 1.0e9) :: Float
                 divisor = 1000000 * mult
-            putStrLn
-              ("Driver 1 -> RX: "
-              <> show (fromIntegral (stRxPkts st1) / divisor)
-              <> "Mpps | TX: "
-              <> show (fromIntegral (stTxPkts st1) / divisor)
-              <> "Mpps" :: Text
-              )
-            putStrLn
-              ("Driver 2 -> RX: "
-              <> show (fromIntegral (stRxPkts st2) / divisor)
-              <> "Mpps | TX: "
-              <> show (fromIntegral (stTxPkts st2) / divisor)
-              <> "Mpps" :: Text
-              )
+                rxStats st = T.show (fromIntegral (stRxPkts st) / divisor)
+                txStats st = T.show (fromIntegral (stRxPkts st) / divisor)
+            T.putStrLn $ "Driver 1 -> RX: " <> rxStats st1 <> "Mpps | TX: " <> txStats st1 <> "Mpps"
+            T.putStrLn $ "Driver 2 -> RX: " <> rxStats st2 <> "Mpps | TX: " <> rxStats st2 <> "Mpps"
             writeIORef timeRef t
           )
       )
