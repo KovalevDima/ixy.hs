@@ -68,7 +68,7 @@ initDev devBdf numRx numTx = do
   T.putStrLn $ "Inititializing device " <> unBusDeviceFunction devBdf <> "."
   devBasePtr              <- mapResource devBdf "resource0"
   (rxQueues, txQueues) <- 
-    go
+    goInitDev
     Device
       { devBasePtr, devBdf
       , devRxQueues = V.empty
@@ -80,7 +80,7 @@ initDev devBdf numRx numTx = do
     , devTxQueues = V.fromList txQueues
     }
  where
-  go dev = do
+  goInitDev dev = do
     reset dev
     initLink dev
     _        <- stats'
@@ -255,9 +255,9 @@ receive dev id' num =
   let queue = devRxQueues dev V.! id'
   in  do
         index <- readIORef (rxqIndexRef queue)
-        go queue index 0 []
+        goReceive queue index 0 []
  where
-  go queue !index !i bufs | i == num = do
+  goReceive queue !index !i bufs | i == num = do
     postProcess
     return bufs
    where postProcess = do
@@ -266,7 +266,7 @@ receive dev id' num =
             let j = (index + i - 1) `rem` numRxQueueEntries
             set dev (RDT id') $ fromIntegral j
             writeIORef (rxqIndexRef queue) index'
-  go queue !index !i bufs = do
+  goReceive queue !index !i bufs = do
     let next    = (index + i) `rem` numRxQueueEntries
         descPtr = rxqDescriptor queue next
     descriptor <- peek descPtr
@@ -285,7 +285,7 @@ receive dev id' num =
           PhysAddr physAddr <- peekAddr newBufPtr
           poke descPtr ReceiveRead {rdBufPhysAddr = physAddr, rdHeaderAddr = 0}
 
-          go queue index (i + 1) (bufPtr : bufs)
+          goReceive queue index (i + 1) (bufPtr : bufs)
       else do
           postProcess
           return bufs
@@ -305,12 +305,12 @@ send dev id' memPool bufs = do
   let txQueue = devTxQueues dev V.! id'
   clean txQueue
   cleanIndex <- readIORef (txqCleanRef txQueue)
-  go txQueue cleanIndex bufs
+  goSend txQueue cleanIndex bufs
   set dev (TDT id')
     =<< (\index -> fromIntegral $ (index - 1) `mod` numTxQueueEntries)
     <$> readIORef (txqIndexRef txQueue)
  where
-  go queue !cleanIndex (bufPtr : bufPtrs) = do
+  goSend queue !cleanIndex (bufPtr : bufPtrs) = do
     let indexRef = txqIndexRef queue
     curIndex <- readIORef indexRef
     let next = curIndex + 1 `rem` numTxQueueEntries
@@ -342,8 +342,8 @@ send dev id' memPool bufs = do
           , tdCmdTypeLen   = fromIntegral $ cmdTypeLen size
           , tdOlInfoStatus = fromIntegral $ shift size 14
           }
-      go queue cleanIndex bufPtrs
-  go _ _ [] = return ()
+      goSend queue cleanIndex bufPtrs
+  goSend _ _ [] = return ()
   clean queue = do
     curIndex   <- readIORef (txqIndexRef queue)
     cleanIndex <- readIORef (txqCleanRef queue)
