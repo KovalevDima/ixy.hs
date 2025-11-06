@@ -22,12 +22,13 @@ module Lib.Ixgbe
   , setPromisc
   , dump
   , memPoolOf
+  , newDriver
   )
 where
 
 import Lib.Ixgbe.Queue
 import Lib.Memory
-import Lib.Pci (BusDeviceFunction(..), mapResource)
+import Lib.Pci (BusDeviceFunction(..), mapResource, busDeviceFunction)
 
 import Data.IORef (modifyIORef', readIORef, writeIORef)
 import Data.Text as T (show, pack)
@@ -47,6 +48,20 @@ data Device = Device { devBasePtr :: Ptr Word32
                      , devTxQueues :: V.Vector TxQueue }
 
 -- $ Initialization
+
+-- | Initializes a driver for a device.
+--
+-- Currently only supports IXGBE.
+newDriver
+  :: Text -- ^ The 'BusDeviceFunction' of the device.
+  -> Int -- ^ The number of rx queues to initialize.
+  -> Int -- ^ The number of tx queues to initialize.
+  -> IO (Maybe Device)
+newDriver bdfT numRx numTx = case busDeviceFunction bdfT of
+  Just bdf -> do
+    !dev <- initDev bdf numRx numTx
+    return $ Just dev
+  Nothing -> return Nothing
 
 initDev :: BusDeviceFunction -> Int -> Int -> IO Device
 initDev devBdf numRx numTx = do

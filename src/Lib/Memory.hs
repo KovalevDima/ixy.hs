@@ -28,7 +28,6 @@ module Lib.Memory
   )
 where
 
-
 import Data.Array.IO (IOUArray, newListArray, readArray, writeArray)
 import Data.Binary.Get (getWord64le, pushChunk, runGetIncremental, Decoder(Fail, Done, Partial))
 import Data.ByteString as B (empty, hGet)
@@ -69,8 +68,7 @@ hugepageSize = shift 1 hugepageBits
 
 -- $ Allocations
 
-allocateMem
-  :: Int -> Bool -> IO (Ptr a)
+allocateMem :: Int -> Bool -> IO (Ptr a)
 allocateMem size contiguous = do
   T.putStrLn
     $  "Allocating a memory chunk with size " <> T.show size

@@ -16,8 +16,8 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   ghc-options:         -Wall
-  exposed-modules:     Lib
-  other-modules:       Lib.Pci, Lib.Memory, Lib.Ixgbe, Lib.Ixgbe.Queue
+  exposed-modules:     Lib.Ixgbe
+  other-modules:       Lib.Pci, Lib.Memory, Lib.Ixgbe.Queue
   build-depends:       base >= 4.7 && < 5
                      , array >= 0.5 && <= 0.6
                      , binary >= 0.8.0.0 && <= 0.10.0.0
