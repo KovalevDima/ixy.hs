@@ -1,5 +1,5 @@
 -- |
--- Module      :  Lib.Ixgbe.Queue
+-- Module      :  Ixgbe.Queue
 -- Copyright   :  Alex Egger 2018
 -- License     :  BSD3
 --
@@ -10,7 +10,7 @@
 -- Description
 --
 
-module Lib.Ixgbe.Queue
+module Ixgbe.Queue
   ( RxQueue(..)
   , TxQueue(..)
   , ReceiveDescriptor(..)
@@ -31,7 +31,7 @@ module Lib.Ixgbe.Queue
   )
 where
 
-import Lib.Memory
+import Ixgbe.Memory
 
 import Data.Array.IO as Array (newListArray, readArray, writeArray, newArray_, IOUArray )
 import Data.IORef (IORef, newIORef)

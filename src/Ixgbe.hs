@@ -1,7 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 -- |
--- Module      :  Lib.Ixgbe
+-- Module      :  Ixgbe
 -- Copyright   :  Alex Egger 2018
 -- License     :  BSD3
 --
@@ -12,7 +12,7 @@
 -- Description
 --
 
-module Lib.Ixgbe
+module Ixgbe
   ( Device(..)
   , Stats(..)
   , initDev
@@ -26,9 +26,9 @@ module Lib.Ixgbe
   )
 where
 
-import Lib.Ixgbe.Queue
-import Lib.Memory
-import Lib.Pci (BusDeviceFunction(..), mapResource, busDeviceFunction)
+import Ixgbe.Queue
+import Ixgbe.Memory
+import Ixgbe.Pci (BusDeviceFunction(..), mapResource, busDeviceFunction)
 
 import Data.IORef (modifyIORef', readIORef, writeIORef)
 import Data.Text as T (show, pack)

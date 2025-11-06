@@ -1,5 +1,5 @@
 -- |
--- Module      :  Lib.Pci
+-- Module      :  Ixgbe.Pci
 -- Copyright   :  Alex Egger 2018
 -- License     :  BSD3
 --
@@ -8,7 +8,7 @@
 -- Portability :  unknown
 --
 -- Provides utility function to work with PCI devices using sysfs.
-module Lib.Pci
+module Ixgbe.Pci
   ( -- * BusDeviceFunction
     BusDeviceFunction(unBusDeviceFunction)
   , busDeviceFunction

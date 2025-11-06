@@ -1,6 +1,6 @@
 module Main where
 
-import Lib.Ixgbe (Stats(stRxPkts), Device, receive, send, stats, memPoolOf, newDriver)
+import Ixgbe (Stats(stRxPkts), Device, receive, send, stats, memPoolOf, newDriver)
 
 import Control.Monad (when, forever)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)

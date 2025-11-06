@@ -36,7 +36,7 @@ The build binaries can be found in
 
 ### API
 
-`src/Lib.hs` defines ixy.hs's public API.
+`src/Ixgbe.hs` defines ixy.hs's public API.
 
 ### Docs
 

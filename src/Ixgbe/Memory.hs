@@ -1,6 +1,6 @@
 {-# LANGUAGE InstanceSigs #-}
 -- |
--- Module      :  Lib.Memory
+-- Module      :  Ixgbe.Memory
 -- Copyright   :  Alex Egger 2018
 -- License     :  BSD3
 --
@@ -10,7 +10,7 @@
 --
 --
 --
-module Lib.Memory
+module Ixgbe.Memory
   ( allocateMem
   , mkMemPool
   , allocateBuf
