@@ -83,17 +83,12 @@ initDev devBdf numRx numTx = do
   goInitDev dev = do
     reset dev
     initLink dev
-    _        <- stats'
+    _        <- stats dev
     rxQueues <- initRx numRx dev
     txQueues <- initTx numTx dev
-    setPromisc' True
+    setPromisc dev True
     waitForLink 10000000 dev
     return (rxQueues, txQueues)
-   where
-    stats' = do
-      stats dev
-    setPromisc' flag = do
-      setPromisc dev flag
 
 initRx :: Int -> Device -> IO [RxQueue]
 initRx numRx dev = do
@@ -206,10 +201,7 @@ initTx numTx dev = do
     
     set dev (TDBAL id') $ fromIntegral $ physAddr .&. 0xFFFFFFFF
     set dev (TDBAH id') $ fromIntegral $ shift physAddr (-32)
-    set dev (TDLEN id')
-        $ fromIntegral
-        $ numTxQueueEntries
-        * sizeOf nullTransmitDescriptor
+    set dev (TDLEN id') $ fromIntegral $ numTxQueueEntries * sizeOf nullTransmitDescriptor
     let phys = T.pack (showHex physAddr "")
         at = T.show (txqDescriptor queue 0)
     T.putStrLn $ "Tx Ring " <> T.show id' <> " at " <> at <> "(phys=" <> phys <> ")."
@@ -251,11 +243,10 @@ reset dev = do
 -- $ Operations
 
 receive :: Device -> Int -> Int -> IO [Ptr PacketBuf]
-receive dev id' num =
+receive dev id' num = do
   let queue = devRxQueues dev V.! id'
-  in  do
-        index <- readIORef (rxqIndexRef queue)
-        goReceive queue index 0 []
+  index <- readIORef (rxqIndexRef queue)
+  goReceive queue index 0 []
  where
   goReceive queue !index !i bufs | i == num = do
     postProcess

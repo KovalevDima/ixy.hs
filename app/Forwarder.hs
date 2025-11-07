@@ -1,4 +1,4 @@
-module Main where
+module Main (main) where
 
 import Ixgbe (Stats(stRxPkts), Device, receive, send, stats, memPoolOf, newDriver)
 
